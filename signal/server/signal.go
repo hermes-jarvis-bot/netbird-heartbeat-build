@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -47,6 +48,12 @@ const (
 	sendTimeout = 10 * time.Second
 
 	applicationName = "signal"
+
+	// EnvFlushAfterRegister opts into sending a placeholder frame immediately
+	// after the registration header on ConnectStream, for proxies that buffer
+	// a headers-only stream until a DATA frame follows it. See the comment on
+	// flushAfterRegister's use in ConnectStream for details.
+	EnvFlushAfterRegister = "NB_SIGNAL_FLUSH_AFTER_REGISTER"
 )
 
 var (
@@ -64,6 +71,8 @@ type Server struct {
 	successHeader metadata.MD
 
 	sendTimeout time.Duration
+
+	flushAfterRegister bool
 }
 
 // NewServer creates a new Signal server
@@ -86,17 +95,31 @@ func NewServer(ctx context.Context, meter metric.Meter, metricsPrefix ...string)
 	}
 
 	s := &Server{
-		dispatcher:    d,
-		registry:      peer.NewRegistry(appMetrics),
-		metrics:       appMetrics,
-		successHeader: metadata.Pairs(proto.HeaderRegistered, "1"),
-		sendTimeout:   sTimeout,
+		dispatcher:         d,
+		registry:           peer.NewRegistry(appMetrics),
+		metrics:            appMetrics,
+		successHeader:      metadata.Pairs(proto.HeaderRegistered, "1"),
+		sendTimeout:        sTimeout,
+		flushAfterRegister: flushAfterRegisterFromEnv(),
 	}
 
 	stopProfiling := profiling.Start(applicationName)
 	s.OnStop(stopProfiling)
 
 	return s, nil
+}
+
+func flushAfterRegisterFromEnv() bool {
+	val := os.Getenv(EnvFlushAfterRegister)
+	if val == "" {
+		return false
+	}
+	enabled, err := strconv.ParseBool(val)
+	if err != nil {
+		log.Warnf("failed to parse %s: %v", EnvFlushAfterRegister, err)
+		return false
+	}
+	return enabled
 }
 
 // Stop runs the handlers registered with OnStop.
@@ -131,6 +154,17 @@ func (s *Server) ConnectStream(stream proto.SignalExchange_ConnectStreamServer) 
 	if err != nil {
 		s.metrics.RegistrationFailures.Add(stream.Context(), 1, metric.WithAttributes(attribute.String(labelError, labelErrorFailedHeader)))
 		return err
+	}
+
+	if s.flushAfterRegister {
+		// Some reverse proxies buffer the HEADERS frame until a DATA frame
+		// follows it. Sending a deliberately invalid placeholder forces the
+		// registration header through; clients discard the placeholder after
+		// the expected decrypt error. Route the send through Peer.Send so it
+		// remains serialized with other stream writes.
+		if err := p.Send(&proto.EncryptedMessage{Key: "signal-server-flush", RemoteKey: p.Id}); err != nil {
+			log.Debugf("failed to send post-registration flush frame to peer [%s]: %v", p.Id, err)
+		}
 	}
 
 	log.Debugf("peer connected [%s] [streamID %d] ", p.Id, p.StreamID)
