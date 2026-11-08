@@ -397,9 +397,8 @@ func (s *Server) sendJobsLoop(ctx context.Context, accountID string, peerKey wgt
 	// todo figure out better error handling strategy
 	defer s.jobManager.CloseChannel(ctx, accountID, peer.ID, updates)
 
-	// Send heartbeat every 30 seconds to keep stream alive through proxies (e.g., Traefik, Cloudflare)
-	// that may have idle timeouts. The client ignores empty messages with no ID.
-	heartbeatInterval := 30 * time.Second
+	// Send heartbeat before the observed 30-second proxy idle timeout.
+	heartbeatInterval := 10 * time.Second
 	ticker := time.NewTicker(heartbeatInterval)
 	defer ticker.Stop()
 
