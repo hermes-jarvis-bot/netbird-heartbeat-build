@@ -1,0 +1,68 @@
+name: Build NetBird signal-flush image
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - signal-flush-v0.83.1
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE_NAME: ghcr.io/hermes-jarvis-bot/netbird-server-signal-flush-v0831
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run Signal server tests
+        run: go test ./signal/server
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: combined/Dockerfile.multistage
+          platforms: linux/amd64
+          push: true
+          provenance: true
+          sbom: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:signal-flush-${{ github.sha }}
+            ${{ env.IMAGE_NAME }}:signal-flush-v0.83.1
+          cache-from: type=gha,scope=netbird-signal-flush
+          cache-to: type=gha,mode=max,scope=netbird-signal-flush
